@@ -1,9 +1,12 @@
+use std::error::Error;
 // use strum::IntoEnumIterator; // 0.17.1
 use strum_macros::EnumIter; // 0.17.1
 
 use num_enum::TryFromPrimitive;
-use std::convert::TryInto;
+// use std::convert::TryInto;
 // use std::fmt;
+
+// use std::collections::{HashMap, HashSet};
 
 use std::fmt::{self, Formatter, UpperHex};
 use num_traits::Signed;
@@ -21,7 +24,7 @@ impl<T: PartialOrd + Signed + UpperHex> UpperHex for ReallySigned<T> {
     }
 }
 
-#[derive(Enum, Clone, Copy)]
+#[derive(Enum, Clone, Copy, Hash)]
 #[allow(non_camel_case_types)]
 #[derive(Debug, EnumIter, Eq, PartialEq, TryFromPrimitive)]
 #[repr(u32)]
@@ -60,11 +63,12 @@ enum MipsGpr {
     ra =  31,
 }
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive)]
 #[allow(non_camel_case_types)]
 #[repr(u32)]
 enum MipsCPUOp {
     special = 0b000_000,
+    regimm  = 0b000_001,
     j       = 0b000_010,
     jal     = 0b000_011,
     bne     = 0b000_101,
@@ -72,9 +76,6 @@ enum MipsCPUOp {
     addiu   = 0b001_001,
     lui     = 0b001_111,
     sw      = 0b101_011,
-
-    nop     = 0b10_000000,
-    error   = 0b11_111111,
 }
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
@@ -83,177 +84,162 @@ enum MipsCPUOp {
 enum MipsCPUFunc {
     jr    = 0b001_000,
     nop   = 0b10_000000,
-    error = 0b11_111111,
 }
 
-#[derive(Debug)]
+#[allow(non_camel_case_types)]
+#[derive(Eq, PartialEq, Hash)]
+enum MipsInstruction {
+    j     {addr: u32},
+    jal   {addr: u32},
+    bne   {rs: MipsGpr, rt: MipsGpr, offset: u32},
+    addi  {rs: MipsGpr, rt: MipsGpr, imm: u32},
+    addiu {rs: MipsGpr, rt: MipsGpr, imm: u32},
+    lui   {rt: MipsGpr, imm: u32},
+    sw    {base: MipsGpr, rt: MipsGpr, offset: u32},
+    jr    {rs: MipsGpr},
+    // Pseudo-instructions
+    bnez  {rs: MipsGpr, offset: u32},
+    nop,
+}
+
 enum MipsInstructionFormat {
-    Special {function: MipsCPUFunc, rs: MipsGpr, rt: MipsGpr, rd: MipsGpr},
-    J {opname: MipsCPUOp, addr: u32},
-    I {opname: MipsCPUOp, rs: MipsGpr, rt: MipsGpr, imm: u32},
-    Error {word: u32},
+    Special,
+    Regimm,
+    J,
+    I,
 }
 
-impl fmt::Display for MipsInstructionFormat {
+impl MipsCPUOp {
+    fn instruction_format(&self) -> MipsInstructionFormat {
+        match self {
+            MipsCPUOp::special => MipsInstructionFormat::Special,
+            MipsCPUOp::j => MipsInstructionFormat::J,
+            MipsCPUOp::jal => MipsInstructionFormat::J,
+            MipsCPUOp::bne => MipsInstructionFormat::I,
+            MipsCPUOp::addi => MipsInstructionFormat::I,
+            MipsCPUOp::addiu => MipsInstructionFormat::I,
+            MipsCPUOp::lui => MipsInstructionFormat::I,
+            MipsCPUOp::sw => MipsInstructionFormat::I,
+            _ => unimplemented!(),
+        }
+    }
+    // const mips_op_to_instruction: HashMap<MipsCPUOp, MipsInstruction> = HashMap::from([
+    //     (MipsCPUOp::addi , MipsInstruction::addi),
+    //     (MipsCPUOp::addiu , MipsInstruction::addiu),
+    // ]);
+
+    
+}
+
+impl fmt::Display for MipsInstruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MipsInstructionFormat::Special { function, rs, rt, rd} => {
-                match function {
-                    MipsCPUFunc::jr => {
-                        assert_eq!(rt, &MipsGpr::zero);
-                        assert_eq!(rd, &MipsGpr::zero);
-                        write!(f, "{:?} {:?}", function, rs)
-                    }
-                    MipsCPUFunc::nop => {
-                        write!(f, "nop")
-                    }
-                    _ => {
-                        write!(f, "Error: unimplemented Special instruction {:?}", self)
-                    }
-                }
-            }
-            MipsInstructionFormat::J { opname, addr } => {
-                match opname {
-                    MipsCPUOp::j | MipsCPUOp::jal => {
-                        write!(f, "{:?} {:#X}", opname, addr)
-                    }
-                    _ => {
-                        write!(f, "Error: unimplemented J instruction {:?}", self)
-                    }
-                }
-            }
-            MipsInstructionFormat::I { opname, rs, rt, imm } => {
-                match opname {
-                    MipsCPUOp::bne => {
-                        let signed_imm = ReallySigned(*imm as i16);
-
-                        if rt == &MipsGpr::zero {
-                            write!(f, "bnez {:?}, {:#X}", rs, signed_imm)
-                        } else {
-                            write!(f, "{:?} {:?}, {:?}, {:#X}", opname, rs, rt, signed_imm)
-                        }
-                    }
-                    MipsCPUOp::lui => {
-                        assert_eq!(rs, &MipsGpr::zero);
-                        write!(f, "{:?} {:?}, {:#X}", opname, rt, imm)
-                    }
-                    MipsCPUOp::addi | MipsCPUOp::addiu => {
-                        let signed_imm = ReallySigned(*imm as i16);
-                        write!(f, "{:?} {:?}, {:?}, {:#X}", opname, rt, rs, signed_imm)
-                    }
-                    MipsCPUOp::sw => {
-                        let signed_imm = ReallySigned(*imm as i16);
-                        write!(f, "{:?} {:?}, {:#X}({:?})", opname, rt, signed_imm, rs)
-                    }
-                    _ => {
-                        write!(f, "Error: unimplemented I instruction {:?}", self)
-                    }
-                }
-            }
-            MipsInstructionFormat::Error { word } => {
-                write!(f, "Error: unknown instruction {:#010X}", word)
-            }
+        MipsInstruction::j     { addr } => write!(f, "j {addr:#010X}"),
+        MipsInstruction::jal   { addr } => write!(f, "jal {addr:#010X}"),
+        MipsInstruction::bne   { rs, rt, offset } => write!(f, "bne {rs:?}, {rt:?}, {:#X}", ReallySigned(*offset as i16)),
+        MipsInstruction::addi  { rs, rt, imm } => write!(f, "addi {rs:?}, {rt:?}, {:#X}", ReallySigned(*imm as i16)),
+        MipsInstruction::addiu { rs, rt, imm } => write!(f, "addiu {rs:?}, {rt:?}, {:#X}", ReallySigned(*imm as i16)),
+        MipsInstruction::lui   { rt, imm } => write!(f, "lui {rt:?}, ({:#X} >> 16)", imm << 16),
+        MipsInstruction::sw    { base, rt, offset } => write!(f, "sw {rt:?}, {:#X}({base:?})", ReallySigned(*offset as i16)),
+        MipsInstruction::jr    { rs } => write!(f, "jr {rs:?}"),
+        // Pseudo-instructions
+        MipsInstruction::bnez {rs, offset } => write!(f, "bnez {rs:?}, {:#X}", ReallySigned(*offset as i16)),
+        MipsInstruction::nop => write!(f, "nop"),
+        _ => unimplemented!(),
         }
     }
 }
 
-fn disassemble_word(word: &u32) -> MipsInstructionFormat {
-    let opcode: u32 = word >> 26;
-    let opname: MipsCPUOp = opcode.try_into().unwrap();
-
-    if word == &0 {
-        // println!("nop");
-        return MipsInstructionFormat::Special{function: MipsCPUFunc::nop, rs: MipsGpr::zero, rt: MipsGpr::zero, rd: MipsGpr::zero}
+impl MipsInstruction {
+    fn is_branch(&self) -> bool {
+        matches!(self, MipsInstruction::j{..} | MipsInstruction::jal{..} | MipsInstruction::jr{..} | MipsInstruction::bne{..} | MipsInstruction::bnez{..})
     }
+}
 
-    match opname {
-        MipsCPUOp::special => {
+fn disassemble_word(word: u32) -> Result<MipsInstruction, Box<dyn Error>> {
+    let opcode: u32 = word >> 26;
+    let opname: MipsCPUOp = opcode.try_into()?;
+    let opform = opname.instruction_format();
+
+    if word == 0 {
+        return Ok(MipsInstruction::nop)
+    }
+    match opform {
+        MipsInstructionFormat::Special => {
             let funccode: u32 = word & 0x1F;
-            let funcname: MipsCPUFunc = funccode.try_into().unwrap();
+            let funcname: MipsCPUFunc = funccode.try_into()?;
+            let rs: MipsGpr = ((word >> 21) & 0x1F).try_into()?;
+            let rt: MipsGpr = ((word >> 16) & 0x1F).try_into()?;
+            let rd: MipsGpr = ((word >> 10) & 0x1F).try_into()?;
 
             match funcname {
                 MipsCPUFunc::jr => {
-                    let rs: MipsGpr = ((word >> 21)).try_into().unwrap();
-
-                    assert_eq!(word & 0b000000_00000_111111111111111_000000, 0);
-                    // println!("{:?} {:?}", funcname, rs);
-                    MipsInstructionFormat::Special{function: funcname, rs: rs, rt: MipsGpr::zero, rd: MipsGpr::zero }
+                    assert_eq!(rt, MipsGpr::zero);
+                    assert_eq!(rd, MipsGpr::zero);
+                    Ok(MipsInstruction::jr{ rs })
                 }
-                _ => {
-                    println!("Unsupported function code {:#04X}", funccode);
-                    MipsInstructionFormat::Error{word: *word}
-                }
+                _ => unimplemented!(),
             }
         }
-        MipsCPUOp::j | MipsCPUOp::jal => {
-            let mut addr = word & 0x3FFFFFF;
-
-            addr <<= 2;
-            // println!("{:?} {:#X}", opname, addr);
-            MipsInstructionFormat::J{opname: opname, addr: addr}
-        }
-        MipsCPUOp::bne => {
-            let rs = ((word >> 21) & 0x1F).try_into().unwrap();
-            let rt = ((word >> 16) & 0x1F).try_into().unwrap();
-            let offset = word & 0xFFFF;
-
-            // if rt == MipsGpr::zero {
-            //     println!("bnez {:?}, {:#X}", rs, offset);
-            // } else {
-            //     println!("{:?} {:?}, {:?}, {:#X}", opname, rs, rt, offset);
-            // }
-            MipsInstructionFormat::I {opname: opname, rs: rs, rt: rt, imm: offset}
-        }
-        MipsCPUOp::lui => {
-            let rs: MipsGpr = ((word >> 21) & 0x1F).try_into().unwrap();
-            let rt = ((word >> 16) & 0x1F).try_into().unwrap();
+        MipsInstructionFormat::I => {
+            let rs: MipsGpr = ((word >> 21) & 0x1F).try_into()?;
+            let rt: MipsGpr = ((word >> 16) & 0x1F).try_into()?;
             let imm = word & 0xFFFF;
+            
+            // println!("{imm:X}");
+            match opname {
+                MipsCPUOp::addi | MipsCPUOp::addiu => {
+                    let imm = imm.try_into()?;
+                    match opname {
+                        MipsCPUOp::addi => Ok(MipsInstruction::addi{ rs, rt, imm }),
+                        MipsCPUOp::addiu => Ok(MipsInstruction::addiu{ rs, rt, imm }),
+                        _ => unimplemented!(),
+                    }
+                }
+                MipsCPUOp::sw => {
+                    let offset = imm.try_into()?;
+                    let base = rs;
+                    Ok(MipsInstruction::sw{ base, rt, offset })
+                }
+                MipsCPUOp::lui => {
+                    // let imm = imm << 16;
+                    assert_eq!(rs, MipsGpr::zero);
+                    Ok(MipsInstruction::lui{ rt, imm })
+                }
+                MipsCPUOp::bne => {
+                    let offset = imm.try_into()?;
+                    if rt == MipsGpr::zero {
+                        Ok(MipsInstruction::bnez{ rs, offset })
+                    } else {
+                        Ok(MipsInstruction::bne{ rs, rt, offset })
+                    }
+                }
+                _ => unimplemented!("Unsupported opcode {opcode:#08b} (read from {word:#010X})"),
+            }
+        }
+        MipsInstructionFormat::J => {
+            let addr = (word & 0x3FFFFFF) << 2;
 
-            assert_eq!(rs, MipsGpr::zero);
-            // println!("{:?} {:?}, {:#X}", opname, rt, imm);
-            MipsInstructionFormat::I {opname: opname, rs: MipsGpr::zero, rt: rt, imm: imm}
+            match opname {
+                MipsCPUOp::j => {
+                    Ok(MipsInstruction::j{ addr })
+                }
+                MipsCPUOp::jal => {
+                    Ok(MipsInstruction::jal{ addr })
+                }
+                _ => unimplemented!("Unsupported opcode {opcode:#08b} (read from {word:#010X})"),
+            }
         }
-        MipsCPUOp::addi | MipsCPUOp::addiu => {
-            let rs = ((word >> 21) & 0x1F).try_into().unwrap();
-            let rt = ((word >> 16) & 0x1F).try_into().unwrap();
-            let imm = word & 0xFFFF;
-
-            // println!("{:?} {:?}, {:?}, {:#X}", opname, rt, rs, imm);
-            MipsInstructionFormat::I {opname: opname, rs: rs, rt: rt, imm: imm}
-        }
-        MipsCPUOp::sw => {
-            let base = ((word >> 21) & 0x1F).try_into().unwrap();
-            let rt = ((word >> 16) & 0x1F).try_into().unwrap();
-            let imm = word & 0xFFFF;
-
-            // println!("{:?} {:?}, {:#X}({:?})", opname, rt, imm, base);
-            MipsInstructionFormat::I {opname: opname, rs: base, rt: rt, imm: imm}
-        }
-        _ => {
-            println!("Unsupported opcode {:#04X}", opcode);
-            MipsInstructionFormat::Error{word: *word}
-        }
+        _ => unimplemented!("Unsupported opcode {opcode:#08b} (read from {word:#010X})"),
     }
 }
 
 
-fn is_branch(instr: &MipsInstructionFormat) -> bool {
-    const BRANCH_OPS: &[MipsCPUOp] = &[ MipsCPUOp::bne ];
-    const BRANCH_FUNCS: &[MipsCPUFunc] = &[ MipsCPUFunc::jr ];
-
-    match instr {
-        MipsInstructionFormat::I { opname, rs: _, rt: _, imm: _} => {
-            BRANCH_OPS.contains(&opname)
-        }
-        MipsInstructionFormat::Special { function, rs: _, rt: _, rd: _ } => {
-            BRANCH_FUNCS.contains(&function)
-        }
-        MipsInstructionFormat::J { opname: _, addr: _ } => true,
-        _ => false
-    }
-}
-
-// const w: [u32; 1] = [ 0x0C000001 ];
+// const DATA: &[u32] = &[ 
+//     0x0C000001,
+//     0,
+//     0 
+// ];
 const DATA: &[u32] = &[
     0x3C088004,
     0x2508E940,
@@ -285,6 +271,7 @@ fn main() {
     let mut bss_start: u32;
 
     let mut consecutive_nops = 0;
+    let mut prev_was_branch = false;
     
     for word in DATA {
         let instr;
@@ -295,37 +282,38 @@ fn main() {
             break;
         }
 
-        instr = disassemble_word(word);
-
-        println!("{}", instr);
-        if is_branch(&instr) {
+        print!("/* {word:08X} */");
+        print!("{}", " ".repeat(5));
+        if prev_was_branch {
             print!(" ");
         }
+
+        instr = disassemble_word(*word).unwrap();
+        prev_was_branch = instr.is_branch();
+
+        println!("{}", instr);
+
+        // Register tracking
         match instr {
-            MipsInstructionFormat::I { opname, rs, rt, imm } => {
-                match opname {
-                    MipsCPUOp::lui => {
-                        reg_tracker[rt] = imm << 16;
-                        println!("{:?} = {:#X}", rt, reg_tracker[rt])
-                    }
-                    MipsCPUOp::addiu => {
-                        reg_tracker[rt] = reg_tracker[rs] + imm + ((imm & 0x8000) << 1)
-                    }
-                    MipsCPUOp::addi => {
-                        if imm >= 0x8000 { bss_sign -= 1 } else { bss_sign += 1 }
-                    }
-                    MipsCPUOp::bne => branch_reg = rs,
-                    MipsCPUOp::sw => bss_ptr_reg = rs,
-                    _ => ()
-                }
+            MipsInstruction::lui { rt, imm } => {
+                reg_tracker[rt] = imm << 16;
             }
-            MipsInstructionFormat::Special { function, rs, rt: _, rd: _ } => {
-                match function {
-                    MipsCPUFunc::jr => jump_reg = rs,
-                    _ => ()
-                }
+            MipsInstruction::addiu { rs, rt, imm } => {
+                reg_tracker[rt] = reg_tracker[rs] + imm + ((imm & 0x8000) << 1);
             }
-            _ => ()
+            MipsInstruction::addi { imm, .. } => {
+                if imm >= 0x8000 { bss_sign -= 1 } else { bss_sign += 1 }
+            }
+            MipsInstruction::bne { rs, .. } | MipsInstruction::bnez { rs, .. } => {
+                branch_reg = rs;
+            }
+            MipsInstruction::jr { rs } => {
+                jump_reg = rs;
+            }
+            MipsInstruction::sw { base, .. } => {
+                bss_ptr_reg = base;
+            }
+            _ => (),
         }
     }
 
