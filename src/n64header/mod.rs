@@ -1,15 +1,14 @@
-use std::borrow::Cow;
+pub mod ipl3;
+
 use std::error::Error;
-use std::vec;
 
 use byteorder::{BigEndian, ReadBytesExt};
-use crc;
 use encoding_rs;
-use std::env;
-use std::fs;
+// use std::env;
+// use std::fs;
 use std::io;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Endian {
     Good,
     Bad,
@@ -75,6 +74,10 @@ impl N64Header {
         }
     }
 
+    pub fn entrypoint(&self) -> u32 {
+        self.entrypoint
+    }
+
     pub fn libultra_version(&self) -> Option<char> {
         char::from_u32(self.revision & 0xFF)
     }
@@ -86,21 +89,60 @@ impl N64Header {
             .to_string()
     }
 
-    pub fn media_format(&self) -> Option<char> {
+    pub fn media_format(&self) -> char {
         char::from_u32(self.media_format)
+            .expect(format!("could not parse media format \"{:X}\"", self.media_format).as_str())
     }
 
     pub fn cartridge_id(&self) -> String {
         String::from_utf8_lossy(&self.cartridge_id).to_string()
-        //self.cartridge_id.iter().map(|&ch| ch as char).collect()
     }
 
-    pub fn country_code(&self) -> Option<char> {
-        Some(self.country_code as char)
+    pub fn country_code(&self) -> char {
+        char::from_u32(self.country_code as u32)
+            .expect(format!("could not parse country code \"{:X}\"", self.media_format).as_str())
     }
 
     pub fn checksum(&self) -> (u32, u32) {
         (self.checksum1, self.checksum2)
+    }
+
+    pub fn media_format_description(&self) -> Result<&'static str, &'static str> {
+        Ok(match self.media_format() {
+            'N' => "cartridge",
+            'D' => "64DD disk",
+            'C' => "cartridge part of expandable game OR GameCube",
+            'E' => "64DD expansion for cart",
+            'Z' => "Aleck64 cartridge",
+            _ => return Err("Unrecognised media format"),
+        })
+    }
+
+    pub fn country_code_description(&self) -> Result<&'static str, &'static str> {
+        Ok(match self.country_code() {
+            '7' => "Beta",
+            'A' => "Asian (NTSC)",
+            'B' => "Brazilian",
+            'C' => "Chinese",
+            'D' => "German",
+            'E' => "North America",
+            'F' => "French",
+            'G' => "Gateway 64 (NTSC)",
+            'H' => "Dutch",
+            'I' => "Italian",
+            'J' => "Japanese",
+            'K' => "Korean",
+            'L' => "Gateway 64 (PAL)",
+            'N' => "Canadian",
+            'P' => "European (basic spec.)",
+            'S' => "Spanish",
+            'U' => "Australian",
+            'W' => "Scandinavian",
+            'X' => "European",
+            'Y' => "European",
+            '\0' => "iQue roms have zeros here",
+            _ => return Err("Unrecognised country code"),
+        })
     }
 }
 
@@ -143,11 +185,14 @@ pub fn read_header(mut reader: impl io::Read) -> io::Result<N64Header> {
     ))
 }
 
+/// Use alternate format to get full version, normal for CSV of
+/// clock_rate, entrypoint, revision, checksum, image_name, media_format, cartridge_id, country_code, version
 impl std::fmt::Display for N64Header {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "pibsddomain1_register:  {:02X} {:02X} {:02X} {:02X}\n\
+        if f.alternate() {
+            write!(
+                f,
+                "pibsddomain1_register:  {:02X} {:02X} {:02X} {:02X}\n\
             clock_rate:             {:08X}\n\
             reported_entrypoint:    {:08X}\n\
             revision:               {:08X}\n\
@@ -155,41 +200,54 @@ impl std::fmt::Display for N64Header {
             unk_18:                 {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}\n\
             image_name:             \"{}\"\n\
             unk_34:                 {:02X} {:02X} {:02X} {:02X}\n\
-            media_format:           {}\n\
+            media_format:           {} ({})\n\
             cartridge_id:           {}\n\
-            country_code:           {}\n\
+            country_code:           {} ({})\n\
             version:                0x{:02X}",
-            self.pibsddomain1_register[0],
-            self.pibsddomain1_register[1],
-            self.pibsddomain1_register[2],
-            self.pibsddomain1_register[3],
-            self.clock_rate,
-            self.entrypoint,
-            self.revision,
-            self.checksum().0,
-            self.checksum().1,
-            self.unk_18[0],
-            self.unk_18[1],
-            self.unk_18[2],
-            self.unk_18[3],
-            self.unk_18[4],
-            self.unk_18[5],
-            self.unk_18[6],
-            self.unk_18[7],
-            // encoding_rs::SHIFT_JIS.decode(&self.image_name).0.to_string(),
-            self.image_name(), //.as_str(),
-            self.unk_34[0],
-            self.unk_34[1],
-            self.unk_34[2],
-            self.unk_34[3],
-            self.media_format()
-                .expect(format!("could not parse {:X}", self.media_format).as_str()),
-            self.cartridge_id(),
-            self.country_code()
-                .expect(format!("could not parse {:X}", self.media_format).as_str()),
-            self.version,
-        )
+                self.pibsddomain1_register[0],
+                self.pibsddomain1_register[1],
+                self.pibsddomain1_register[2],
+                self.pibsddomain1_register[3],
+                self.clock_rate,
+                self.entrypoint,
+                self.revision,
+                self.checksum().0,
+                self.checksum().1,
+                self.unk_18[0],
+                self.unk_18[1],
+                self.unk_18[2],
+                self.unk_18[3],
+                self.unk_18[4],
+                self.unk_18[5],
+                self.unk_18[6],
+                self.unk_18[7],
+                self.image_name(),
+                self.unk_34[0],
+                self.unk_34[1],
+                self.unk_34[2],
+                self.unk_34[3],
+                self.media_format(),
+                self.media_format_description().unwrap(),
+                self.cartridge_id(),
+                self.country_code(),
+                self.country_code_description().unwrap(),
+                self.version,
+            )
+        } else {
+            write!(
+                f,
+                "{:08X}, {:08X}, {:08X}, {:08X} {:08X}, {}, {}, {}, {}, {:X}",
+                self.clock_rate,
+                self.entrypoint,
+                self.revision,
+                self.checksum().0,
+                self.checksum().1,
+                self.image_name(),
+                self.media_format(),
+                self.cartridge_id(),
+                self.country_code(),
+                self.version
+            )
+        }
     }
 }
-
-

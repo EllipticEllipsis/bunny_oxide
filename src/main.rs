@@ -3,19 +3,8 @@ mod n64header;
 use std::{env, fs::File, io::{Read, Seek}};
 
 use n64header::Endian;
+use n64header::ipl3;
 use mips::*;
-
-// use std::error::Error;
-// use strum::IntoEnumIterator; // 0.17.1
-// use strum_macros::EnumIter; // 0.17.1
-
-// use num_enum::TryFromPrimitive;
-// use std::convert::TryInto;
-// use std::fmt;
-
-// use std::collections::{HashMap, HashSet};
-
-// use std::fmt::{self, Formatter, UpperHex};
 
 
 use enum_map::EnumMap;
@@ -117,6 +106,41 @@ fn parse_entrypoint(data: &[u32]) {
     // }
 }
 
+fn bytes_to_reend_word(bytes: [u8; 4], endian: &Endian) -> u32 {
+    match endian {
+        Endian::Good => u32::from_be_bytes(bytes),
+        Endian::Bad => u32::from_le_bytes(bytes),
+        Endian::Ugly => u32::from_be_bytes([bytes[1],bytes[0],bytes[3],bytes[2]]),
+    }
+}
+
+fn bytes_to_reend_bytes(bytes: &[u8; 4], endian: &Endian) -> [u8; 4] {
+    match endian {
+        Endian::Good => *bytes,
+        Endian::Bad => [bytes[3],bytes[2],bytes[1],bytes[0]],
+        Endian::Ugly => [bytes[1],bytes[0],bytes[3],bytes[2]],
+    }
+}
+
+/// Re-ends an array in-place
+pub fn reend_array(v: &mut [u8], endian: &Endian) {
+    let n = v.len();
+    assert!(n % 4 == 0);
+    match endian {
+        Endian::Good => (),
+        Endian::Bad => {
+            for chunk in v.chunks_exact_mut(4) {
+                chunk.reverse();
+            }
+        }
+        Endian::Ugly => {
+            for chunk in v.chunks_exact_mut(2) {
+                chunk.reverse();                
+            }
+        }
+    };
+}
+
 fn main() {
     let endian: Endian;
     let args: Vec<String> = env::args().collect();
@@ -134,21 +158,31 @@ fn main() {
     let mut buffer = [0u8; 4];
     romfile.read_exact(&mut buffer).unwrap();
     endian = n64header::get_endian(&buffer).unwrap();
-    match endian {
-        Endian::Good => {
-            println!("Endian: {endian:?}");
-        }
-        _ => unimplemented!("Wordswapped and byteswapped ROMs are not currently supported")
-    }
+    // match endian {
+    //     Endian::Good => {
+    //         println!("Endian: {endian:?}");
+    //     }
+    //     _ => unimplemented!("Wordswapped and byteswapped ROMs are not currently supported")
+    // }
     romfile.rewind().unwrap();
 
-    let header = n64header::read_header(&romfile).expect("Failed to parse header");
+
+    let mut buffer = [0u8; 0x40];
+    romfile.read_exact(&mut buffer).unwrap();
+    reend_array(&mut buffer, &endian);
+
+    
+    let header = n64header::read_header(&buffer[..]).expect("Failed to parse header");
     println!();
     println!("ROM Header:");
-    println!("{}", header);
+    println!("{:#}", header);
     
     println!();
     println!("Libultra version: {}", header.libultra_version().unwrap());
 
+    let cic_info = ipl3::identify(romfile).unwrap();
+
+    println!("CIC chip: {}", cic_info.name());
+    println!("Corrected entrypoint: {:X}", cic_info.correct_entrypoint(header.entrypoint()));
     // parse_entrypoint(DATA);
 }
