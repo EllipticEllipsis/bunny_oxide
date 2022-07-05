@@ -1,4 +1,8 @@
 mod mips;
+mod n64header;
+use std::{env, fs::File, io::{Read, Seek}};
+
+use n64header::Endian;
 use mips::*;
 
 // use std::error::Error;
@@ -114,5 +118,37 @@ fn parse_entrypoint(data: &[u32]) {
 }
 
 fn main() {
-    parse_entrypoint(DATA);
+    let endian: Endian;
+    let args: Vec<String> = env::args().collect();
+
+    let file_name = &args[1];
+    let base_name = file_name.split('/').last().expect(format!("Invalid file name: {}", file_name).as_str());
+    println!("File: {}", base_name);
+
+    let mut romfile = File::open(file_name).unwrap();
+
+    let file_size = romfile.metadata().unwrap().len();
+    println!("ROM size: 0x{file_size:X} bytes ({} MB)", file_size / (1 << 20));
+
+    // Determine endianness
+    let mut buffer = [0u8; 4];
+    romfile.read_exact(&mut buffer).unwrap();
+    endian = n64header::get_endian(&buffer).unwrap();
+    match endian {
+        Endian::Good => {
+            println!("Endian: {endian:?}");
+        }
+        _ => unimplemented!("Wordswapped and byteswapped ROMs are not currently supported")
+    }
+    romfile.rewind().unwrap();
+
+    let header = n64header::read_header(&romfile).expect("Failed to parse header");
+    println!();
+    println!("ROM Header:");
+    println!("{}", header);
+    
+    println!();
+    println!("Libultra version: {}", header.libultra_version().unwrap());
+
+    // parse_entrypoint(DATA);
 }
