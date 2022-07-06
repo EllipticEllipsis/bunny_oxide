@@ -1,7 +1,7 @@
 use crc;
 use std::io;
 
-#[derive(Debug, Clone)]
+// #[derive(Debug, Clone)]
 pub struct CICInfo {
     checksum: u32,
     ntsc_name: &'static str,

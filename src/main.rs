@@ -1,14 +1,11 @@
 mod mips;
 mod n64header;
-use std::{env, fs::File, io::{Read, Seek}};
+use std::{env, fs::File, io::{Read, Seek, SeekFrom}};
 
+use mips::disassemble_word;
 use n64header::Endian;
 use n64header::ipl3;
-use mips::*;
-
-
-use enum_map::EnumMap;
-
+use n64header::entrypoint;
 
 // const DATA: &[u32] = &[ 
 //     0x0C000001,
@@ -33,84 +30,13 @@ const DATA: &[u32] = &[
     0x00000000,
 ];
 
-fn parse_entrypoint(data: &[u32]) {
-    let mut reg_tracker: EnumMap<MipsGpr, u32> = EnumMap::default();
-    let mut branch_reg: MipsGpr = MipsGpr::zero;
-    let mut bss_ptr_reg: MipsGpr = MipsGpr::zero;
-    let mut bss_sign = 0;
-    let bss_size: u32;
-    let mut jump_reg: MipsGpr = MipsGpr::zero;
-    let jump_addr: u32;
-    let mut bss_start: u32;
 
-    let mut consecutive_nops = 0;
-    let mut prev_was_branch = false;
-    
-    for word in data {
-        let instr;
-
-        consecutive_nops = if word == &0 { consecutive_nops + 1 } else { 0 };
-        if consecutive_nops > 1 {
-            println!("Second nop found, breaking out of loop.");
-            break;
-        }
-
-        print!("/* {word:08X} */");
-        print!("{}", " ".repeat(5));
-        if prev_was_branch {
-            print!(" ");
-        }
-
-        instr = disassemble_word(*word).unwrap();
-        prev_was_branch = instr.has_delay_slot();
-
-        println!("{}", instr);
-
-        // Register tracking
-        match instr {
-            MipsInstruction::lui { rDest, imm } => {
-                reg_tracker[rDest] = imm << 16;
-            }
-            MipsInstruction::addiu { rSrc, rDest, imm } => {
-                reg_tracker[rDest] = reg_tracker[rSrc] + imm + ((imm & 0x8000) << 1);
-            }
-            MipsInstruction::addi { imm, .. } => {
-                if imm >= 0x8000 { bss_sign -= 1 } else { bss_sign += 1 }
-            }
-            MipsInstruction::bne { rCmpL, .. } | MipsInstruction::bnez { rCmp: rCmpL, .. } => {
-                branch_reg = rCmpL;
-            }
-            MipsInstruction::jr { rSrc } => {
-                jump_reg = rSrc;
-            }
-            MipsInstruction::sw { rBase, .. } => {
-                bss_ptr_reg = rBase;
-            }
-            _ => (),
-        }
-    }
-
-    println!();
-
-    jump_addr = reg_tracker[jump_reg];
-    bss_size = reg_tracker[branch_reg];
-    bss_start = reg_tracker[bss_ptr_reg];
-    bss_start = if bss_sign < 0 { bss_start - bss_size } else { bss_start };
-    
-    println!("jump to:    {:#010X}", jump_addr);
-    println!("bss size:   {:#10X}", bss_size);
-    println!("bss start:  {:#010X}", bss_start);
-    println!("initial sp: {:#010X}", reg_tracker[MipsGpr::sp]);
-    // for x in reg_tracker {
-    //     println!("{:?}, {:#X}", x.0, x.1);
-    // }
-}
-
-fn bytes_to_reend_word(bytes: [u8; 4], endian: &Endian) -> u32 {
+fn bytes_to_reend_word(bytes: &[u8], endian: &Endian) -> u32 {
+    assert!(bytes.len() >= 4);
     match endian {
-        Endian::Good => u32::from_be_bytes(bytes),
-        Endian::Bad => u32::from_le_bytes(bytes),
-        Endian::Ugly => u32::from_be_bytes([bytes[1],bytes[0],bytes[3],bytes[2]]),
+        Endian::Good => u32::from_be_bytes(bytes.try_into().unwrap()),
+        Endian::Bad => u32::from_le_bytes(bytes.try_into().unwrap()),
+        Endian::Ugly => u32::from_be_bytes([bytes[1], bytes[0], bytes[3], bytes[2]]),
     }
 }
 
@@ -141,6 +67,41 @@ pub fn reend_array(v: &mut [u8], endian: &Endian) {
     };
 }
 
+fn guess_gcc_or_ido(data: &[u8], endian: &Endian) {
+    let mut j_count = 0;
+    let mut b_count = 0;
+    let mut current_rom_address = 0x1000;
+
+    println!();
+    println!("Examining up to {:#X} bytes", data.len());
+    for chunk in data.chunks_exact(4) {
+        let word = bytes_to_reend_word(chunk, endian);
+        let instr = disassemble_word(word);
+        
+        use mips::MipsInstruction;
+        match instr {
+            Ok(MipsInstruction::b { .. }) => b_count += 1,
+            Ok(MipsInstruction::j { .. }) => j_count += 1,
+            Err(instr) => {
+                println!("Found {}", instr);
+                println!("Stopping here and reporting results");
+                break;
+            }
+            _ => (),
+        }
+        current_rom_address += 1;
+    }
+    println!("Examined range 0x1000–{current_rom_address:#X} of boot segment");
+    println!("  B count:{b_count}");
+    println!("  J count:{j_count}");
+    println!();
+    if b_count > j_count {
+        println!("  Probably IDO");
+    } else {
+        println!("  Probably GCC");
+    }
+}
+
 fn main() {
     let endian: Endian;
     let args: Vec<String> = env::args().collect();
@@ -167,11 +128,10 @@ fn main() {
     romfile.rewind().unwrap();
 
 
+    // Read header
     let mut buffer = [0u8; 0x40];
     romfile.read_exact(&mut buffer).unwrap();
     reend_array(&mut buffer, &endian);
-
-    
     let header = n64header::read_header(&buffer[..]).expect("Failed to parse header");
     println!();
     println!("ROM Header:");
@@ -180,9 +140,27 @@ fn main() {
     println!();
     println!("Libultra version: {}", header.libultra_version().unwrap());
 
-    let cic_info = ipl3::identify(romfile).unwrap();
-
+    // Identify ipl3 and correct entrypoint
+    let cic_info = ipl3::identify(&romfile).unwrap();
+    let entrypoint = cic_info.correct_entrypoint(header.entrypoint());
     println!("CIC chip: {}", cic_info.name());
-    println!("Corrected entrypoint: {:X}", cic_info.correct_entrypoint(header.entrypoint()));
-    // parse_entrypoint(DATA);
+    println!("Corrected entrypoint: {entrypoint:X}");
+
+    // Parse entrypoint
+    let mut buffer = [0u8; 0x100];
+    romfile.read(&mut buffer).unwrap();
+    let (jump_addr, bss_start, bss_size, initial_sp) = entrypoint::parse(&buffer, entrypoint, &endian);
+
+    println!("jump to:    {:#010X}", jump_addr);
+    println!("bss start:  {:#010X}", bss_start);
+    println!("bss size:   {:#10X}", bss_size);
+    println!("initial sp: {:#010X}", initial_sp);
+
+    // Guess GCC vs IDO
+    let boot_size = (bss_start - entrypoint) as usize;
+    let mut buffer = vec![0u8; boot_size];
+    // let mut buffer = Vec::<u8>::with_capacity(boot_size);
+    romfile.seek(SeekFrom::Start(0x1000)).unwrap();
+    romfile.read(&mut buffer).unwrap();
+    guess_gcc_or_ido(&buffer, &endian);
 }

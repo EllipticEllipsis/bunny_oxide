@@ -1,3 +1,4 @@
+pub mod entrypoint;
 pub mod ipl3;
 
 use std::error::Error;
@@ -193,17 +194,17 @@ impl std::fmt::Display for N64Header {
             write!(
                 f,
                 "pibsddomain1_register:  {:02X} {:02X} {:02X} {:02X}\n\
-            clock_rate:             {:08X}\n\
-            reported_entrypoint:    {:08X}\n\
-            revision:               {:08X}\n\
-            checksum:               {:08X} {:08X}\n\
-            unk_18:                 {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}\n\
-            image_name:             \"{}\"\n\
-            unk_34:                 {:02X} {:02X} {:02X} {:02X}\n\
-            media_format:           {} ({})\n\
-            cartridge_id:           {}\n\
-            country_code:           {} ({})\n\
-            version:                0x{:02X}",
+                clock_rate:             {:08X}\n\
+                reported_entrypoint:    {:08X}\n\
+                revision:               {:08X}\n\
+                checksum:               {:08X} {:08X}\n\
+                unk_18:                 {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}\n\
+                image_name:             \"{}\"\n\
+                unk_34:                 {:02X} {:02X} {:02X} {:02X}\n\
+                media_format:           {} ({})\n\
+                cartridge_id:           {}\n\
+                country_code:           {} ({})\n\
+                version:                0x{:02X}",
                 self.pibsddomain1_register[0],
                 self.pibsddomain1_register[1],
                 self.pibsddomain1_register[2],
