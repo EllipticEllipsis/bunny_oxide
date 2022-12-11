@@ -32,7 +32,7 @@ impl CICInfo {
             0xA0DD69F7 => CICInfo::new(0xA0DD69F7, "6106", "7106", 0x200000),
             0x0013579C => CICInfo::new(0x0013579C, "6101", "-", 0x000000),
             0xDAB442CD => CICInfo::new(0xDAB442CD, "-", "7102", 0x80000480),
-            _ => panic!("Unrecognised IPL3 type.")
+            _ => CICInfo::new(0, "unk", "unk", 0x000000),
         })
     }
 

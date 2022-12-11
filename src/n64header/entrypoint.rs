@@ -1,5 +1,7 @@
+use super::super::VERBOSE;
 use crate::mips::*;
 use crate::n64header::Endian;
+use ::rabbitizer;
 use enum_map::EnumMap;
 
 fn bytes_to_reend_word(bytes: &[u8], endian: &Endian) -> u32 {
@@ -11,95 +13,210 @@ fn bytes_to_reend_word(bytes: &[u8], endian: &Endian) -> u32 {
     }
 }
 
-pub fn parse(data: &[u8], address: u32, endian: &Endian) -> (u32, u32, u32, u32) {
-    let mut reg_tracker: EnumMap<MipsGpr, u32> = EnumMap::default();
-    let mut branch_reg: MipsGpr = MipsGpr::zero;
-    let mut bss_ptr_reg: MipsGpr = MipsGpr::zero;
-    let mut bss_sign = 0;
-    let bss_size: u32;
-    let mut jump_reg: MipsGpr = MipsGpr::zero;
-    let jump_addr: u32;
-    let mut bss_start: u32;
+struct MyInstruction {
+    instr: rabbitizer::Instruction,
+}
 
-    let mut consecutive_nops = 0;
-    let mut prev_has_delay_slot = false;
+impl MyInstruction {
+    fn instr_get_rs(&self) -> MipsGpr {
+        ((self.instr.raw() >> 21) & 0x1F).try_into().unwrap()
+    }
+    fn instr_get_rt(&self) -> MipsGpr {
+        ((self.instr.raw() >> 16) & 0x1F).try_into().unwrap()
+    }
+    fn instr_get_rd(&self) -> MipsGpr {
+        ((self.instr.raw() >> 11) & 0x1F).try_into().unwrap()
+    }
+}
+
+fn add_signed_imm(u: u32, s: i32) -> u32 {
+    if s >= 0 {
+        u + s as u32
+    } else {
+        u - (-s as u32)
+    }
+}
+#[derive(Debug)]
+#[allow(non_camel_case_types)]
+enum LowerAddrOp {
+    None,
+    addiu,
+    ori,
+}
+
+impl Default for LowerAddrOp {
+    fn default() -> Self {
+        LowerAddrOp::None
+    }
+}
+
+pub fn parse(data: &[u8], address: u32, endian: &Endian, base_name: &str) -> (u32, u32, u32, u32) {
+    let mut reg_tracker: EnumMap<MipsGpr, u32> = EnumMap::default();
+    let mut reg_ops: EnumMap<MipsGpr, LowerAddrOp> = EnumMap::default();
+    let mut bss_ptr_reg: MipsGpr = MipsGpr::zero;
+    let mut bss_size_reg: MipsGpr = MipsGpr::zero;
+    let mut bss_size: u32 = 0;
+    let mut jump_reg: MipsGpr = MipsGpr::zero;
+    let mut jump_addr: Option<u32> = None;
+    let mut bss_start: u32;
+    let mut jal_found = false;
+    let mut final_delay_slot_used = "";
 
     let mut current_ram_address = address;
     let mut current_rom_address = 0x1000;
 
-    for chunk in data.chunks_exact(4) {
+    let mut prev_was_jump = false;
+
+    let mut length = 0;
+
+    for (i, chunk) in data.chunks_exact(4).enumerate() {
         let word = bytes_to_reend_word(chunk, endian);
 
-        let instr;
+        let instr = rabbitizer::Instruction::new(word, address + 4 * i as u32);
+        let my_instruction = MyInstruction { instr };
 
-        consecutive_nops = if word == 0 { consecutive_nops + 1 } else { 0 };
-        if consecutive_nops > 1 {
-            println!("Second nop found, breaking out of loop.");
-            break;
-        }
-
-        print!("/* {current_ram_address:08X} {current_rom_address:06X} {word:08X} */");
-        print!("{}", " ".repeat(5));
-        if prev_has_delay_slot {
-            print!(" ");
-        }
-
-        instr = disassemble_word(word).unwrap_or_else(|_| panic!("{word:X}"));
-        prev_has_delay_slot = instr.has_delay_slot();
-
-        println!("{}", instr);
-
-        // Register tracking
-        match instr {
-            MipsInstruction::lui { rDest, imm } => {
-                reg_tracker[rDest] = imm << 16;
+        // println!("{:?}", my_instruction.instr.instr_id());
+        match my_instruction.instr.instr_id() {
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_lui => {
+                reg_tracker[my_instruction.instr_get_rt()] =
+                    (my_instruction.instr.processed_immediate() << 16) as u32;
+                // println!("lui: {:#X}", my_instruction.instr.processed_immediate());
             }
-            MipsInstruction::addiu { rSrc, rDest, imm } => {
-                reg_tracker[rDest] = reg_tracker[rSrc] + imm + ((imm & 0x8000) << 1);
-            }
-            MipsInstruction::ori { rSrc, rDest, imm } => {
-                reg_tracker[rDest] = reg_tracker[rSrc] + imm;
-            }
-            MipsInstruction::addi { imm, .. } => {
-                if imm >= 0x8000 {
-                    bss_sign -= 1
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_addiu => {
+                let out_reg = my_instruction.instr_get_rt();
+                // Already applied an addiu
+                if reg_tracker[out_reg] & 0xFFFF == 0 {
+                    // println!(
+                    //     "addiuing: {:#X} + {:#X}",
+                    //     reg_tracker[my_instruction.instr_get_rs()],
+                    //     my_instruction.instr.processed_immediate()
+                    // );
+                    reg_tracker[out_reg] = add_signed_imm(
+                        reg_tracker[my_instruction.instr_get_rs()],
+                        my_instruction.instr.processed_immediate(),
+                    );
+                    // println!("= {:#X}", reg_tracker[out_reg]);
+                    reg_ops[out_reg] = LowerAddrOp::addiu;
                 } else {
-                    bss_sign += 1
+                    // println!("addiu blocked: {:#X}", reg_tracker[out_reg] & 0xFFFF);
                 }
             }
-            MipsInstruction::bne { rCmpL, .. } | MipsInstruction::bnez { rCmp: rCmpL, .. } => {
-                branch_reg = rCmpL;
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_ori => {
+                let out_reg = my_instruction.instr_get_rt();
+                reg_tracker[my_instruction.instr_get_rt()] = reg_tracker
+                    [my_instruction.instr_get_rs()]
+                    | my_instruction.instr.processed_immediate() as u32;
+                reg_ops[out_reg] = LowerAddrOp::ori;
             }
-            MipsInstruction::jr { rSrc } => {
-                jump_reg = rSrc;
+
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_addi => {
+                let out_reg = my_instruction.instr_get_rt();
+                if my_instruction.instr.processed_immediate() < 0 {
+                    bss_size_reg = out_reg;
+                }
             }
-            MipsInstruction::sw { rBase, .. } => {
-                bss_ptr_reg = rBase;
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_sw => {
+                let out_reg = my_instruction.instr_get_rs();
+                bss_ptr_reg = out_reg;
+            }
+
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_jal => {
+                jump_addr = Some(my_instruction.instr.instr_index_as_vram());
+                jal_found = true;
+            }
+            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_jalr
+            | rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_jr => {
+                jump_reg = my_instruction.instr_get_rs();
+                jump_addr = Some(reg_tracker[jump_reg]);
             }
             _ => (),
         }
 
-        current_ram_address += 4;
-        current_rom_address += 4;
+        // Stop after the instruction after the jump
+        if prev_was_jump {
+            if my_instruction.instr.is_nop() {
+                if VERBOSE {
+                    println!("Final delay slot NOP. GCC assembler?");
+                }
+                final_delay_slot_used = "nop";
+            } else {
+                if VERBOSE {
+                    println!("Final delay slot used. IDO assembler?");
+                }
+                final_delay_slot_used = "yep";
+            }
+            length = 4 * i;
+            break;
+        }
+
+        if my_instruction.instr.is_jump() {
+            prev_was_jump = true;
+        }
     }
 
-    println!();
-
-    jump_addr = reg_tracker[jump_reg];
-    bss_size = reg_tracker[branch_reg];
     bss_start = reg_tracker[bss_ptr_reg];
-    bss_start = if bss_sign < 0 {
-        bss_start - bss_size
-    } else {
-        bss_start
-    };
 
-    // println!("jump to:    {:#010X}", jump_addr);
+    // Work out the rest of the bss stuff
+    if bss_size_reg == MipsGpr::zero {
+        for (reg, value) in reg_tracker {
+            if ![jump_reg, MipsGpr::sp, bss_ptr_reg].contains(&reg) && value != 0 {
+                if value < bss_start {
+                    bss_size_reg = reg;
+                    bss_size = value;
+                } else {
+                    bss_size = value - bss_start;
+                }
+                break;
+            }
+        }
+    } else {
+        bss_size = reg_tracker[bss_size_reg];
+    }
+
+    if jump_addr.is_none() {
+        jump_addr = Some(reg_tracker[jump_reg]);
+    }
+
+    bss_start = reg_tracker[bss_ptr_reg];
+
+    
+    if length > 0x40 {
+        eprintln!(
+            "{base_name}: Entrypoint is unusually long ({:#X} bytes), recommend closer investigation",
+            length
+        );
+    }
+    
+    // assert!(bss_start > address);
+    
+    if !VERBOSE {
+        print!(
+            "{:X}; {:X}; {:X}; {:X}; {:X}; {:?}; {:?}; {:?}; {}; {}; ",
+            length,
+            reg_tracker[MipsGpr::sp],
+            bss_start,
+            bss_size,
+            jump_addr.unwrap(),
+            reg_ops[MipsGpr::sp],
+            reg_ops[bss_ptr_reg],
+            reg_ops[bss_size_reg],
+            if jal_found { "jal" } else { "jr" },
+            final_delay_slot_used
+        );
+    }
+
+    // println!("jump to:    {:#010X}", jump_addr.unwrap());
     // println!("bss start:  {:#010X}", bss_start);
     // println!("bss size:   {:#10X}", bss_size);
     // println!("initial sp: {:#010X}", reg_tracker[MipsGpr::sp]);
     // for x in reg_tracker {
     //     println!("{:?}, {:#X}", x.0, x.1);
     // }
-    (jump_addr, bss_start, bss_size, reg_tracker[MipsGpr::sp])
+
+    (
+        jump_addr.unwrap(),
+        bss_start,
+        bss_size,
+        reg_tracker[MipsGpr::sp],
+    )
 }

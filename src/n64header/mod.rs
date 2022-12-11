@@ -91,8 +91,9 @@ impl N64Header {
     }
 
     pub fn media_format(&self) -> char {
-        char::from_u32(self.media_format)
-            .expect(format!("could not parse media format \"{:X}\"", self.media_format).as_str())
+        char::from_u32(self.media_format).unwrap_or('?')
+
+            // .expect(format!("could not parse media format \"{:X}\"", self.media_format).as_str())
     }
 
     pub fn cartridge_id(&self) -> String {
@@ -237,7 +238,7 @@ impl std::fmt::Display for N64Header {
         } else {
             write!(
                 f,
-                "{:08X}, {:08X}, {:08X}, {:08X} {:08X}, {}, {}, {}, {}, {:X}",
+                "{:08X}; {:08X}; {:08X}; {:08X} {:08X}; {}; {}; {}; {}; {:X}",
                 self.clock_rate,
                 self.entrypoint,
                 self.revision,

@@ -14,3 +14,4 @@ enum-map = "*"
 byteorder = "1.4.3"
 crc = "3.0.0"
 encoding_rs = "0.8.31"
+rabbitizer = { git = "https://github.com/encounter/rabbitizer-rs", rev = "10c279b2ef251c62885b1dcdcfe740b0db8e9956" }
