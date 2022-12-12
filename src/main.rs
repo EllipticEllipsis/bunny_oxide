@@ -1,9 +1,10 @@
 mod mips;
 mod n64header;
+use mips::MipsGpr;
 use std::{
     env,
     fs::File,
-    io::{Read, Seek, SeekFrom, self, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 
 // use mips::disassemble_word;
@@ -62,37 +63,47 @@ pub fn reend_array(v: &mut [u8], endian: &Endian) {
 fn guess_gcc_or_ido(data: &[u8], endian: &Endian) {
     let mut j_count = 0;
     let mut b_count = 0;
-    let mut current_rom_address = 0x1000;
 
     if VERBOSE {
         println!();
         println!("Examining up to {:#X} bytes", data.len());
     }
-    for chunk in data.chunks_exact(4) {
+
+    let mut in_function = false;
+    let mut text_end = None;
+    // let mut consecutive_nops = 0;
+    for (i, chunk) in data.chunks_exact(4).rev().enumerate() {
         let word = bytes_to_reend_word(chunk, endian);
-        let instr = rabbitizer::Instruction::new(word, 0); // TODO: maybe correct this
+        let instr = rabbitizer::Instruction::new(word, 0);
 
-        if !instr.is_valid() {
-            if VERBOSE {
-                println!(
-                    "Found invalid instruction: {} (word {:#X})",
-                    instr.disassemble(None, 0),
-                    instr.raw()
-                );
-                println!("Stopping here and reporting results");
+        // if instr.is_nop() {
+        //     consecutive_nops += 1;
+        // } else {
+        //     consecutive_nops = 0;
+        // }
+        if instr.is_jr_ra() {
+            in_function = true;
+            if text_end.is_none() {
+                text_end = Some(0x1000 + data.len() - 4 * i);
             }
-            break;
-        }
-        match instr.instr_id() {
-            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_b => b_count += 1,
-            rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_j => j_count += 1,
-            _ => (),
+        } else if !instr.is_valid() {
+            in_function = false
         }
 
-        current_rom_address += 1;
+        if in_function {
+            match instr.instr_id() {
+                rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_b => b_count += 1,
+                rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_j => j_count += 1,
+                _ => (),
+            }
+        }
     }
+
     if VERBOSE {
-        println!("Examined range 0x1000–{current_rom_address:#X} of boot segment");
+        println!(
+            "Examined range 0x1000–{:#X} of boot segment",
+            text_end.unwrap()
+        );
         println!("  B count:{b_count}");
         println!("  J count:{j_count}");
         println!();
@@ -104,7 +115,23 @@ fn guess_gcc_or_ido(data: &[u8], endian: &Endian) {
             println!("  Probably GCC");
         }
     } else {
-        print!("{current_rom_address:#X}; {b_count}; {j_count}; ");
+        print!("{:#X}; {b_count}; {j_count}; ", text_end.unwrap());
+    }
+}
+
+struct MyInstruction {
+    instr: rabbitizer::Instruction,
+}
+
+impl MyInstruction {
+    fn instr_get_rs(&self) -> MipsGpr {
+        ((self.instr.raw() >> 21) & 0x1F).try_into().unwrap()
+    }
+    fn instr_get_rt(&self) -> MipsGpr {
+        ((self.instr.raw() >> 16) & 0x1F).try_into().unwrap()
+    }
+    fn instr_get_rd(&self) -> MipsGpr {
+        ((self.instr.raw() >> 11) & 0x1F).try_into().unwrap()
     }
 }
 
@@ -159,7 +186,6 @@ fn run(file_name: &String) -> Result<(), String> {
         print!("{}; {}; ", header, header.libultra_version().unwrap());
     }
 
-
     // Identify ipl3 and correct entrypoint
     let cic_info = ipl3::identify(&romfile).unwrap();
     let entrypoint = cic_info.correct_entrypoint(header.entrypoint());
@@ -177,22 +203,24 @@ fn run(file_name: &String) -> Result<(), String> {
     let (jump_addr, bss_start, bss_size, initial_sp) =
         entrypoint::parse(&buffer, entrypoint, &endian, base_name);
 
-        if VERBOSE {
-            println!("jump to:    {:#010X}", jump_addr);
-            println!("bss start:  {:#010X}", bss_start);
-            println!("bss size:   {:#10X}", bss_size);
-            println!("initial sp: {:#010X}", initial_sp);
-        }
+    if VERBOSE {
+        println!("jump to:    {:#010X}", jump_addr);
+        println!("bss start:  {:#010X}", bss_start);
+        println!("bss size:   {:#10X}", bss_size);
+        println!("initial sp: {:#010X}", initial_sp);
+    }
 
     // Guess GCC vs IDO
+    let mut buffer;
     if bss_start > entrypoint {
         let boot_size = (bss_start - entrypoint) as usize;
-        let mut buffer = vec![0u8; boot_size];
-        // let mut buffer = Vec::<u8>::with_capacity(boot_size);
-        romfile.seek(SeekFrom::Start(0x1000)).unwrap();
-        romfile.read(&mut buffer).unwrap();
-        guess_gcc_or_ido(&buffer, &endian);
+        buffer = vec![0u8; boot_size];
+    } else {
+        buffer = vec![0u8; 0x100000];
     }
+    romfile.seek(SeekFrom::Start(0x1000)).unwrap();
+    romfile.read(&mut buffer).unwrap();
+    guess_gcc_or_ido(&buffer, &endian);
 
     if !VERBOSE {
         println!();

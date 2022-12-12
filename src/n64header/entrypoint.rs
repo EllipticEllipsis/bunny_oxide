@@ -4,28 +4,14 @@ use crate::n64header::Endian;
 use ::rabbitizer;
 use enum_map::EnumMap;
 
+use super::super::MyInstruction;
+
 fn bytes_to_reend_word(bytes: &[u8], endian: &Endian) -> u32 {
     assert!(bytes.len() >= 4);
     match endian {
         Endian::Good => u32::from_be_bytes(bytes.try_into().unwrap()),
         Endian::Bad => u32::from_le_bytes(bytes.try_into().unwrap()),
         Endian::Ugly => u32::from_be_bytes([bytes[1], bytes[0], bytes[3], bytes[2]]),
-    }
-}
-
-struct MyInstruction {
-    instr: rabbitizer::Instruction,
-}
-
-impl MyInstruction {
-    fn instr_get_rs(&self) -> MipsGpr {
-        ((self.instr.raw() >> 21) & 0x1F).try_into().unwrap()
-    }
-    fn instr_get_rt(&self) -> MipsGpr {
-        ((self.instr.raw() >> 16) & 0x1F).try_into().unwrap()
-    }
-    fn instr_get_rd(&self) -> MipsGpr {
-        ((self.instr.raw() >> 11) & 0x1F).try_into().unwrap()
     }
 }
 
@@ -182,16 +168,30 @@ pub fn parse(data: &[u8], address: u32, endian: &Endian, base_name: &str) -> (u3
     
     if length > 0x40 {
         eprintln!(
-            "{base_name}: Entrypoint is unusually long ({:#X} bytes), recommend closer investigation",
+            "{base_name}: Read entrypoint is unusually long ({:#X} bytes), recommend closer investigation",
+            length
+        );
+    } else if length < 0x30 {
+        eprintln!(
+            "{base_name}: Read entrypoint is unusually short ({:#X} bytes), recommend closer investigation",
             length
         );
     }
     
-    // assert!(bss_start > address);
+    let mut has_break = false;
+    for (i, chunk) in data[0..length + 0x10].chunks_exact(4).enumerate() {
+        let word = bytes_to_reend_word(chunk, endian);
+        let instr = rabbitizer::Instruction::new(word, address + 4 * i as u32);
+
+        if instr.instr_id() == rabbitizer::InstrId::RABBITIZER_INSTR_ID_cpu_break {
+            has_break = true;
+            break;
+        }
+    }
     
     if !VERBOSE {
         print!(
-            "{:X}; {:X}; {:X}; {:X}; {:X}; {:?}; {:?}; {:?}; {}; {}; ",
+            "{:X}; {:X}; {:X}; {:X}; {:X}; {:?}; {:?}; {:?}; {}; {}; {};",
             length,
             reg_tracker[MipsGpr::sp],
             bss_start,
@@ -201,7 +201,8 @@ pub fn parse(data: &[u8], address: u32, endian: &Endian, base_name: &str) -> (u3
             reg_ops[bss_ptr_reg],
             reg_ops[bss_size_reg],
             if jal_found { "jal" } else { "jr" },
-            final_delay_slot_used
+            final_delay_slot_used,
+            has_break
         );
     }
 
